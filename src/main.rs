@@ -1,7 +1,8 @@
 use anyhow::{bail, Context as _};
 use quick_xml::{Reader, Writer};
 use quick_xml::events::Event;
-use std::io::{BufRead, Write};
+use std::fs::File;
+use std::io::{self, BufRead, BufReader, Write};
 use std::path::PathBuf;
 
 trait StartsWithExt<U> {
@@ -53,15 +54,17 @@ fn parse_args() -> Vec<PathBuf> {
     paths
 }
 
-pub fn join_gpx<R, W>(readers: impl Iterator<Item=Reader<R>>, mut writer: Writer<W>)
+pub fn join_gpx<R, W>(sources: impl Iterator<Item=R>, dest: W)
     -> anyhow::Result<()>
     where R: BufRead,
           W: Write,
 {
     let mut first = None;
     let mut buf = vec![];
-    for mut r in readers {
+    let mut writer = Writer::new(dest);
+    for source in sources {
         let mut path = vec![];
+        let mut r = Reader::from_reader(source);
         loop {
             let evt = r.read_event(&mut buf)?;
             match evt {
@@ -113,14 +116,17 @@ pub fn join_gpx<R, W>(readers: impl Iterator<Item=Reader<R>>, mut writer: Writer
 }
 
 fn main() -> anyhow::Result<()> {
-    let writer = Writer::new(std::io::stdout());
-    let mut readers = vec![];
+    let mut files = vec![];
     for path in parse_args() {
-        let r = Reader::from_file(&path)
-            .with_context(|| format!("failed to open {:?}", path))?;
-        readers.push(r);
+        let r = BufReader::new(
+                File::open(&path)
+                    .with_context(|| format!("failed to open {:?}", path))?);
+        files.push(r);
     }
-    join_gpx(readers.into_iter(), writer)?;
+    if files.is_empty() {
+        bail!("need at least one source file");
+    }
+    join_gpx(files.into_iter(), io::stdout())?;
     Ok(())
 }
 
@@ -132,7 +138,7 @@ mod tests {
 
     #[test]
     fn test() {
-        let a = Reader::from_str(r#"<?xml version="1.0" encoding="utf-8"?>
+        let mut a = Cursor::new(r#"<?xml version="1.0" encoding="utf-8"?>
 <gpx version="1.1" creator="gpxjoin" xmlns="http://www.topografix.com/GPX/1/1">
     <metadata>
         <name><![CDATA[this is the first file]]></name>
@@ -149,8 +155,8 @@ mod tests {
         </trkseg>
     </trk>
 </gpx>
-"#);
-        let b = Reader::from_str(r#"<?xml version="1.0" encoding="utf-8"?>
+"#.as_bytes());
+        let mut b = Cursor::new(r#"<?xml version="1.0" encoding="utf-8"?>
 <gpx version="1.1" creator="gpxjoin" xmlns="http://www.topografix.com/GPX/1/1">
     <metadata>
         <name><![CDATA[this is the second file]]></name>
@@ -167,9 +173,9 @@ mod tests {
         </trkseg>
     </trk>
 </gpx>
-"#);
+"#.as_bytes());
         let mut out = Cursor::new(vec![]);
-        join_gpx(std::array::IntoIter::new([a, b]), Writer::new(&mut out)).unwrap();
+        join_gpx(std::array::IntoIter::new([&mut a, &mut b]), &mut out).unwrap();
 
         // Indentation at the second track is weird because XML is a bad format; there's no
         // reasonable way around it.
