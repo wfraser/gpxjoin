@@ -1,6 +1,7 @@
 use anyhow::{bail, Context as _};
 use quick_xml::{Reader, Writer};
 use quick_xml::events::Event;
+use std::io::{BufRead, Write};
 use std::path::PathBuf;
 
 trait StartsWithExt<U> {
@@ -52,31 +53,29 @@ fn parse_args() -> Vec<PathBuf> {
     paths
 }
 
-fn main() -> anyhow::Result<()> {
-    let mut writer = Writer::new(std::io::stdout());
+pub fn join_gpx<R, W>(readers: impl Iterator<Item=Reader<R>>, mut writer: Writer<W>)
+    -> anyhow::Result<()>
+    where R: BufRead,
+          W: Write,
+{
     let mut first = None;
     let mut buf = vec![];
-    for path in parse_args() {
-        let mut r = Reader::from_file(&path)
-            .with_context(|| format!("failed to open {:?}", path))?;
-
+    for mut r in readers {
         let mut path = vec![];
         loop {
             let evt = r.read_event(&mut buf)?;
-            if matches!(evt, Event::Eof) {
-                break;
-            }
             match evt {
+                Event::Eof => break,
                 Event::Start(ref start) => {
                     path.push(start.name().to_owned());
                 }
-                Event::End(_) => {
-                    if path == [b"gpx"] {
-                        // Done with tracks, save the first file reader at this point and move on
-                        // to the next file.
-                        first = Some((r, evt.into_owned()));
-                        break;
-                    }
+                Event::End(_) if first.is_none() && path == [b"gpx"] => {
+                    // Done with tracks, save the first file reader at this point and move on
+                    // to the next file.
+                    // Note we can only do this when we're sure there won't be additional track
+                    // elements, hence why the check is when the path is just "gpx".
+                    first = Some((r, evt.into_owned()));
+                    break;
                 }
                 _ => (),
             }
@@ -109,5 +108,97 @@ fn main() -> anyhow::Result<()> {
         writer.write_event(evt)?;
         buf.clear();
     }
+
     Ok(())
+}
+
+fn main() -> anyhow::Result<()> {
+    let writer = Writer::new(std::io::stdout());
+    let mut readers = vec![];
+    for path in parse_args() {
+        let r = Reader::from_file(&path)
+            .with_context(|| format!("failed to open {:?}", path))?;
+        readers.push(r);
+    }
+    join_gpx(readers.into_iter(), writer)?;
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use pretty_assertions::assert_eq;
+    use std::io::Cursor;
+
+    #[test]
+    fn test() {
+        let a = Reader::from_str(r#"<?xml version="1.0" encoding="utf-8"?>
+<gpx version="1.1" creator="gpxjoin" xmlns="http://www.topografix.com/GPX/1/1">
+    <metadata>
+        <name><![CDATA[this is the first file]]></name>
+        <desc>description here</desc>
+        <author><name>whatever</name></author>
+    </metadata>
+    <trk>
+        <name>first track</name>
+        <trkseg>
+            <trkpt lat="47.543448" lon="-121.096462">
+                <ele>1008.620662</ele>
+                <time>2021-08-27T18:59:24.070Z</time>
+            </trkpt>
+        </trkseg>
+    </trk>
+</gpx>
+"#);
+        let b = Reader::from_str(r#"<?xml version="1.0" encoding="utf-8"?>
+<gpx version="1.1" creator="gpxjoin" xmlns="http://www.topografix.com/GPX/1/1">
+    <metadata>
+        <name><![CDATA[this is the second file]]></name>
+        <desc>description here</desc>
+        <author><name>whatever</name></author>
+    </metadata>
+    <trk>
+        <name>second track</name>
+        <trkseg>
+            <trkpt lat="47.552213" lon="-121.133853">
+                <ele>1750.672203</ele>
+                <time>2021-08-27T22:04:05.536Z</time>
+            </trkpt>
+        </trkseg>
+    </trk>
+</gpx>
+"#);
+        let mut out = Cursor::new(vec![]);
+        join_gpx(std::array::IntoIter::new([a, b]), Writer::new(&mut out)).unwrap();
+
+        // Indentation at the second track is weird because XML is a bad format; there's no
+        // reasonable way around it.
+        assert_eq!(String::from_utf8(out.into_inner()).unwrap(),
+            r#"<?xml version="1.0" encoding="utf-8"?>
+<gpx version="1.1" creator="gpxjoin" xmlns="http://www.topografix.com/GPX/1/1">
+    <metadata>
+        <name><![CDATA[this is the first file]]></name>
+        <desc>description here</desc>
+        <author><name>whatever</name></author>
+    </metadata>
+    <trk>
+        <name>first track</name>
+        <trkseg>
+            <trkpt lat="47.543448" lon="-121.096462">
+                <ele>1008.620662</ele>
+                <time>2021-08-27T18:59:24.070Z</time>
+            </trkpt>
+        </trkseg>
+    </trk>
+<trk>
+        <name>second track</name>
+        <trkseg>
+            <trkpt lat="47.552213" lon="-121.133853">
+                <ele>1750.672203</ele>
+                <time>2021-08-27T22:04:05.536Z</time>
+            </trkpt>
+        </trkseg>
+    </trk></gpx>
+"#);
+    }
 }
