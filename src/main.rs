@@ -54,11 +54,7 @@ fn parse_args() -> Vec<PathBuf> {
     paths
 }
 
-pub fn join_gpx<R, W>(sources: impl Iterator<Item=R>, dest: W)
-    -> anyhow::Result<()>
-    where R: BufRead,
-          W: Write,
-{
+pub fn join_gpx<R: BufRead, W: Write>(sources: &mut [R], dest: W) -> anyhow::Result<()> {
     let mut first = None;
     let mut buf = vec![];
     let mut writer = Writer::new(dest);
@@ -126,7 +122,7 @@ fn main() -> anyhow::Result<()> {
     if files.is_empty() {
         bail!("need at least one source file");
     }
-    join_gpx(files.into_iter(), io::stdout())?;
+    join_gpx(&mut files, io::stdout())?;
     Ok(())
 }
 
@@ -138,7 +134,7 @@ mod tests {
 
     #[test]
     fn test() {
-        let mut a = Cursor::new(r#"<?xml version="1.0" encoding="utf-8"?>
+        let a = Cursor::new(r#"<?xml version="1.0" encoding="utf-8"?>
 <gpx version="1.1" creator="gpxjoin" xmlns="http://www.topografix.com/GPX/1/1">
     <metadata>
         <name><![CDATA[this is the first file]]></name>
@@ -156,7 +152,7 @@ mod tests {
     </trk>
 </gpx>
 "#.as_bytes());
-        let mut b = Cursor::new(r#"<?xml version="1.0" encoding="utf-8"?>
+        let b = Cursor::new(r#"<?xml version="1.0" encoding="utf-8"?>
 <gpx version="1.1" creator="gpxjoin" xmlns="http://www.topografix.com/GPX/1/1">
     <metadata>
         <name><![CDATA[this is the second file]]></name>
@@ -175,7 +171,7 @@ mod tests {
 </gpx>
 "#.as_bytes());
         let mut out = Cursor::new(vec![]);
-        join_gpx(std::array::IntoIter::new([&mut a, &mut b]), &mut out).unwrap();
+        join_gpx(&mut [a, b], &mut out).unwrap();
 
         // Indentation at the second track is weird because XML is a bad format; there's no
         // reasonable way around it.
